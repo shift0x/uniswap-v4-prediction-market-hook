@@ -230,6 +230,59 @@ contract PredictionMarketHook is BaseHook {
     }
 
     /**
+     * @notice Quote the price of market
+     * @param id The market id
+     * @return quoteBull The quote for the bull side of the market
+     * @return quoteBear The quote for the bear side of the market
+     */
+    function getQuote(
+        bytes32 id
+    ) public view returns(uint256 quoteBull, uint256 quoteBear){
+        PredictionMarket memory market = markets[id];
+
+        return market.quote();
+    }
+
+    /**
+     * @notice Get the user position for the given market
+     * @param id The market id
+     * @param user The market paricipant
+     * @return position The current user position in the prediction market
+     */
+    function getUserPosition(
+        bytes32 id,
+        address user
+    ) public view returns (Position memory){
+        return positions[id][user];
+    }
+
+    /**
+     * @notice Get the bull and bear amount given for the liquidity provided
+     * @param pool Pool hosting the prediction market
+     * @param closedAtTimestamp Timestamp for when the market closes
+     * @param amount Deposit amount
+     * @param side Side to add liquidity to, optionally choose both to add proportionally
+     * @return bullAmount Expected bull amount exposure
+     * @return bearAmount Executed bear amount exposure
+     */
+    function getLiquidityAmounts(
+        PoolId pool,
+        uint256 closedAtTimestamp,
+        uint256 amount,
+        Side side
+    ) public returns (uint256 bullAmount, uint256 bearAmount){
+        PoolInfo memory poolInfo = _poolRegistry[pool];
+
+        // no liquidity can be added to closed or unregistered pools
+        if(!poolInfo.registered || closedAtTimestamp <= block.timestamp) {
+            return (0,0);
+        }
+        
+        (bullAmount, bearAmount,) = 
+            markets.addLiquidity(pool, closedAtTimestamp, poolManager, side, amount, FEE, true);
+    }
+
+    /**
      * @notice Add liquidity to a given prediction market
      * @dev The deposit token taken from the user balance will be the token0 of the given market, which is the 
      * first token in the sorted pair
@@ -257,7 +310,7 @@ contract PredictionMarketHook is BaseHook {
         uint256 closedAtTimestamp,
         uint256 amount,
         Side side
-    ) public returns (Position memory position) {
+    ) public returns (Position memory position, bytes32 marketId) {
         PoolInfo memory poolInfo = _poolRegistry[pool];
 
         // only create prediction markets for pools registered with the hook
@@ -272,7 +325,7 @@ contract PredictionMarketHook is BaseHook {
         
         // add liquidity to the corresponding prediction market to the user request. If one is not found, one will be created
         (uint256 bullAmount, uint256 bearAmount, PredictionMarket memory market) = 
-            markets.addLiquidity(pool, closedAtTimestamp, poolManager, side, amount, FEE);
+            markets.addLiquidity(pool, closedAtTimestamp, poolManager, side, amount, FEE, false);
 
         // transfer deposit funds from the user account to the hook contract. The user position will be updated for bull 
         // and bear units corresponding to the current market prices after fees. 
@@ -290,7 +343,7 @@ contract PredictionMarketHook is BaseHook {
             _predictionMarketPartipants[msg.sender][pool] = closedAtTimestamp;
         }
 
-        return updatedPosition;
+        return (updatedPosition, market.id);
     }
 
     /**
@@ -313,7 +366,7 @@ contract PredictionMarketHook is BaseHook {
             poolManager,
             Currency.unwrap(poolInfo.pool.currency0));
 
-        poolManager.donate(poolInfo.pool, settledMarket.fees, 0, new bytes(0));
+        //poolManager.donate(poolInfo.pool, settledMarket.fees, 0, new bytes(0));
 
         return settledMarket;
     }
@@ -325,11 +378,12 @@ contract PredictionMarketHook is BaseHook {
      * @return winnings the amount claimed to the msg.sender
      */
     function collect(bytes32 marketId) public returns (uint256 winnings){
+        
         // fetch the market and settle it try to settle it if it's still open
         PredictionMarket memory market = markets[marketId];
 
         if(!market.settled){
-            settle(marketId);
+            market = settle(marketId);
         }
 
         // determine the amount of funds to send to the user if any then mark the position as claimed

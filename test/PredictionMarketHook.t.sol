@@ -13,6 +13,7 @@ import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PredictionMarketHook} from "../src/PredictionMarketHook.sol";
+import {PositionStorage} from "../src/lib/PositionStorage.sol";
 
 import { 
     PredictionMarket,
@@ -26,15 +27,18 @@ import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
+import {PoolSwapTest} from "v4-core/src/test/PoolSwapTest.sol";
 
 contract PredictionMarketHookTest is Test, Fixtures {
     using EasyPosm for IPositionManager;
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
+    using PositionStorage for Position;
 
     PredictionMarketHook hook;
     PoolId poolId;
+
 
     function setUp() public {
         // creates the pool manager, utility routers, and test tokens
@@ -110,12 +114,11 @@ contract PredictionMarketHookTest is Test, Fixtures {
     }
 
     function testSuccessfulAddLiquidity() public {
-        uint8 decimals = 18;
-        uint256 amountIn = 1*(10**decimals);
+        uint256 amountIn = 1*(10**18);
         uint256 endTimestamp = block.timestamp+60;
         bytes32 marketId = hook.getMarketId(poolId, endTimestamp);
         
-        Position memory position = hook.addLiquidity(poolId, endTimestamp, amountIn, Side.Both);
+        (Position memory position,) = hook.addLiquidity(poolId, endTimestamp, amountIn, Side.Both);
 
         PredictionMarket memory market = hook.getMarketById(marketId);
 
@@ -124,11 +127,77 @@ contract PredictionMarketHookTest is Test, Fixtures {
         // Fetch the sqrtX96Price from the pool manager
         (uint160 sqrtPriceX96,,,) = manager.getSlot0(poolId);
 
-        assertEq(marketId, market.id);
-        assertEq(position.bullAmount, amountIn/2);
-        assertEq(position.bearAmount, amountIn/2);
+        
         assertEq(amountIn, market.liquidity);
+        assertEq(marketId, market.id);
+        assertEq(position.bullAmount, amountIn);
+        assertEq(position.bearAmount, amountIn);
         assertEq(sqrtPriceX96, market.openPrice);
         assertEq(expectedFee, market.fees);
+    }
+
+    function testMarketEndToEnd() public {
+        uint256 amountIn = 1*(10**18);
+        uint256 endTimestamp = block.timestamp+60;
+        bytes32 marketId = hook.getMarketId(poolId, endTimestamp);
+
+        address alice = address(10);
+        address bill = address(100);
+        
+        enterMarket(alice, amountIn, Side.Both, endTimestamp);
+        enterMarket(bill, amountIn, Side.Bull, endTimestamp);
+
+        swap(true, 10*(10**18));
+        
+        vm.warp(endTimestamp + 10000);
+        vm.roll(block.number + 100);
+
+        uint256 aliceWinnings = collect(alice, marketId);
+        uint256 billWinnings = collect(bill, marketId);
+
+        uint256 prizePool = 2*amountIn;
+        uint256 expectedPrize = prizePool - (Math.mulDiv(prizePool, hook.FEE(), 1e6));
+
+        assertEq(aliceWinnings, expectedPrize);
+        assertEq(billWinnings, 0);
+    }
+
+    function enterMarket(address who, uint256 amount, Side side, uint256 endTimestamp) private returns (Position memory position, bytes32 id) {
+        currency0.transfer(who, amount);
+
+        vm.startPrank(who);
+
+        IERC20(Currency.unwrap(currency0)).approve(address(hook), type(uint256).max);
+
+        (position, id) = hook.addLiquidity(poolId, endTimestamp, amount, side);
+
+        vm.stopPrank();
+    }
+
+    function collect(address who, bytes32 marketId) private returns (uint256 amount){
+        vm.startPrank(who);
+        
+        amount = hook.collect(marketId);
+
+        vm.stopPrank();
+
+        return amount;
+    }
+
+    function swap(bool zeroForOne, int256 amount) private {
+        IPoolManager.SwapParams memory params = IPoolManager.SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: amount,
+            sqrtPriceLimitX96: zeroForOne ? MIN_PRICE_LIMIT : MAX_PRICE_LIMIT // unlimited impact
+        });
+
+        bytes memory hookData = new bytes(0);
+
+        // in v4, users have the option to receieve native ERC20s or wrapped ERC1155 tokens
+        // here, we'll take the ERC20s
+        PoolSwapTest.TestSettings memory testSettings =
+            PoolSwapTest.TestSettings({takeClaims: false, settleUsingBurn: false});
+
+        swapRouter.swap(key, params, testSettings, hookData);
     }
 }

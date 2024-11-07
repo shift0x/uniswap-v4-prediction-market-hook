@@ -58,6 +58,7 @@ library PredictionMarketStorage {
      * @param side The side to add liquidity to
      * @param amount Deposit amount
      * @param feePercentage The fee amount
+     * @param preview whether the calc should update the market
      * @return bullAmount The bull amount of units credited
      * @return bearAmount The bear amount of units credited
      * @return market The modified market
@@ -69,11 +70,16 @@ library PredictionMarketStorage {
         IPoolManager poolManager,
         Side side,
         uint256 amount,
-        uint256 feePercentage
+        uint256 feePercentage,
+        bool preview
     ) internal returns (uint256 bullAmount, uint256 bearAmount, PredictionMarket memory market) {
         market = _getOrCreate(self, pool, closedAtTimestamp, poolManager);
 
-        (bullAmount, bearAmount) = market.addLiquidity(side, amount, feePercentage);
+        (bullAmount, bearAmount) = market.addLiquidity(side, amount, feePercentage, preview);
+
+        if(preview){
+            return (bullAmount, bearAmount, market);
+        }
 
         self[market.id] = market;
     }

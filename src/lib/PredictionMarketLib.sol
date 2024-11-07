@@ -43,10 +43,16 @@ library PredictionMarketLib {
     function quote(
         PredictionMarket memory self
     ) internal pure returns (uint256 quoteBull, uint256 quoteBear) {
-        uint256 liquidity = netLiquidity(self);
+        uint256 defaultPrice = 1e18/2;
 
-        quoteBull = Math.mulDiv(self.balanceBull, 1e18, liquidity);
-        quoteBear = Math.mulDiv(self.balanceBear, 1e18, liquidity);
+        if(self.balanceBear * self.balanceBull == 0){
+            return (defaultPrice, defaultPrice);
+        }
+
+        uint256 units = self.balanceBull + self.balanceBear;
+
+        quoteBull = Math.mulDiv(self.balanceBull, 1e18, units);
+        quoteBear = Math.mulDiv(self.balanceBear, 1e18, units);
     }
 
     /**
@@ -80,7 +86,7 @@ library PredictionMarketLib {
      * @param self The prediction market
      */
     function isActive(PredictionMarket memory self) internal view returns (bool) {
-        return isInitalized(self) && self.endTime < block.timestamp;
+        return isInitalized(self) && self.endTime > block.timestamp;
     }
 
     /**
@@ -109,6 +115,7 @@ library PredictionMarketLib {
      * @param amount The deposited liquidity amount
      * @param side The side to add liquidit to
      * @param feePercentage The fee amount
+     * @param preview whether the calc should update the market
      * @return bullAmount The bull amount of units credited
      * @return bearAmount The bear amount of units credited
      */
@@ -116,13 +123,33 @@ library PredictionMarketLib {
         PredictionMarket memory self,
         Side side,
         uint256 amount,
-        uint256 feePercentage
+        uint256 feePercentage,
+        bool preview
     ) internal pure returns (uint256 bullAmount, uint256 bearAmount) {
-        if(side == Side.Both){
-            return _addProportionalLiquidity(self, amount, feePercentage);
-        } else {
-            return _addSingleSidedLiquidity(self, side, amount, feePercentage);
+        (uint256 quoteBull, uint256 quoteBear) = quote(self);
+        (uint256 bullAmountIn, uint256 bearAmountIn) = (0,0);
+
+        if(side == Side.Bear){
+            bearAmountIn = amount;
+        } else if(side == Side.Bull){
+            bullAmountIn = amount;
+        } else if(side == Side.Both){
+            bullAmountIn = amount/2;
+            bearAmountIn = amount/2;
         }
+
+        bullAmount = bullAmountIn > 0 ? Math.mulDiv(bullAmountIn, 1e18, quoteBull) : 0;
+        bearAmount = bearAmountIn > 0 ? Math.mulDiv(bearAmountIn, 1e18, quoteBear) : 0;
+
+        if(preview){
+            return (bullAmount, bearAmount);
+        }
+
+        // adjust the market balances based on the calculated values
+        self.liquidity += amount;
+        self.balanceBear += bearAmount;
+        self.balanceBull += bullAmount;
+        self.fees += _calculateFees(amount, feePercentage);
     }
 
     /**
@@ -136,74 +163,6 @@ library PredictionMarketLib {
         uint256 feePercentage
     ) private pure returns (uint256 fee) {
         return Math.mulDiv(amount, feePercentage, 1e6);
-    }
-
-    /**
-     * @notice Add liquidity to a given market 
-     * @dev Credits msg.sender with a proportional value of bull/bear units and increments liquidity.
-     *
-     * For new markets (no pre-existing liquidity), users are credited an equal balance of bull/bear
-     * @param self The prediction market
-     * @param amount The deposited liquidity amount
-     * @param feePercentage The fee percentage
-     * @return bullAmount Bull units credited
-     * @return bearAmount Bear units credited 
-     */
-    function _addProportionalLiquidity(
-        PredictionMarket memory self,
-        uint256 amount,
-        uint256 feePercentage
-    ) private pure returns (uint256 bullAmount, uint256 bearAmount) {
-        if(self.liquidity == 0){
-            bullAmount = amount/2;
-            bearAmount = amount/2;
-        } else if(self.balanceBear == 0 || self.balanceBull == 0) {
-            revert CannotAddProportionalLiquidityToSingleSidedMarket();
-        } else {
-            (uint256 quoteBull, uint256 quoteBear) = quote(self);
-
-            bullAmount = Math.mulDiv(amount, quoteBull, 1e18);
-            bearAmount = Math.mulDiv(amount, quoteBear, 1e18);
-        }
-        
-        self.liquidity += amount;
-        self.balanceBear += bullAmount;
-        self.balanceBull += bearAmount;
-        self.fees += _calculateFees(amount, feePercentage);
-    }
-
-    /**
-     * @notice Add liquidity to one side of the market
-     * @dev Adding single sided liquidity will have price impact for subsequent swaps
-     * @param self The prediction market
-     * @param amount The deposited liquidity amount
-     * @param side Side of the market to add liquidity to 
-     * @param feePercentage The fee percentage
-     * @return bullAmount Bull units credited
-     * @return bearAmount Bear units credited 
-     */
-    function _addSingleSidedLiquidity(
-        PredictionMarket memory self,
-        Side side,
-        uint256 amount,
-        uint256 feePercentage
-    ) private pure returns (uint256 bullAmount, uint256 bearAmount) {
-        // Revert if there is no liquidity in the market, then amounts will be equal to the deposited amount
-        // otherwise amounts will equal the proportioned amount based on current market values
-        if(self.liquidity == 0){
-            (bullAmount, bearAmount) = side == Side.Bull ? (amount, uint256(0)) : (0, amount);
-        } else {
-            (uint256 quoteBull, uint256 quoteBear) = quote(self);
-            
-            bullAmount = side == Side.Bull ? Math.mulDiv(amount, 1e18, quoteBull) : 0;
-            bearAmount = side == Side.Bear ? Math.mulDiv(amount, 1e18, quoteBear) : 0;
-        }
-
-        // adjust the market balances based on the calculated values
-        self.liquidity += amount;
-        self.balanceBear += bearAmount;
-        self.balanceBull += bullAmount;
-        self.fees += _calculateFees(amount, feePercentage);
     }
 
     /**
