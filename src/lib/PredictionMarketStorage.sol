@@ -173,7 +173,7 @@ library PredictionMarketStorage {
         PoolId pool,
         uint256 closedAtTimestamp,
         IPoolManager poolManager
-    ) private returns (PredictionMarket memory market) {
+    ) private view returns (PredictionMarket memory market) {
         bytes32 marketId = getMarketId(pool, closedAtTimestamp);
 
         market = self[marketId];

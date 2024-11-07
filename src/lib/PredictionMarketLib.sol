@@ -117,7 +117,7 @@ library PredictionMarketLib {
         Side side,
         uint256 amount,
         uint256 feePercentage
-    ) internal returns (uint256 bullAmount, uint256 bearAmount) {
+    ) internal pure returns (uint256 bullAmount, uint256 bearAmount) {
         if(side == Side.Both){
             return _addProportionalLiquidity(self, amount, feePercentage);
         } else {
@@ -153,7 +153,7 @@ library PredictionMarketLib {
         PredictionMarket memory self,
         uint256 amount,
         uint256 feePercentage
-    ) private returns (uint256 bullAmount, uint256 bearAmount) {
+    ) private pure returns (uint256 bullAmount, uint256 bearAmount) {
         if(self.liquidity == 0){
             bullAmount = amount/2;
             bearAmount = amount/2;
@@ -187,7 +187,7 @@ library PredictionMarketLib {
         Side side,
         uint256 amount,
         uint256 feePercentage
-    ) private returns (uint256 bullAmount, uint256 bearAmount) {
+    ) private pure returns (uint256 bullAmount, uint256 bearAmount) {
         // Revert if there is no liquidity in the market, then amounts will be equal to the deposited amount
         // otherwise amounts will equal the proportioned amount based on current market values
         if(self.liquidity == 0){

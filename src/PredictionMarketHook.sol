@@ -121,9 +121,9 @@ contract PredictionMarketHook is BaseHook {
 
     constructor(
         IPoolManager _poolManager,
-        uint24 defaultFee) BaseHook(_poolManager
+        uint24 fee) BaseHook(_poolManager
     ) {
-        DEFAULT_SWAP_FEE = defaultFee;
+        DEFAULT_SWAP_FEE = fee;
     }
 
     
@@ -176,7 +176,7 @@ contract PredictionMarketHook is BaseHook {
     function beforeSwap(
         address, 
         PoolKey calldata key, 
-        IPoolManager.SwapParams calldata swapParams, 
+        IPoolManager.SwapParams calldata, 
         bytes calldata
     ) external override poolManagerOnly returns (bytes4, BeforeSwapDelta, uint24){
         PoolId poolId = key.toId();

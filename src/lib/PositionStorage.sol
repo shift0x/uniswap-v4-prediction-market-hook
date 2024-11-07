@@ -27,7 +27,7 @@ library PositionStorage {
         Position memory self,
         PredictionMarket memory market,
         address claimToken
-    ) internal returns (uint256 claimAmount) {
+    ) internal view returns (uint256 claimAmount) {
         uint256 claimTokenMultiplier = 10**IERC20Metadata(claimToken).decimals();
 
         uint256 bullValue = Math.mulDiv(self.bullAmount, market.closingBullValue, claimTokenMultiplier);
