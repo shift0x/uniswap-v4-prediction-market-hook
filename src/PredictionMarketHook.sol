@@ -366,7 +366,7 @@ contract PredictionMarketHook is BaseHook {
             poolManager,
             Currency.unwrap(poolInfo.pool.currency0));
 
-        //poolManager.donate(poolInfo.pool, settledMarket.fees, 0, new bytes(0));
+        poolManager.donate(poolInfo.pool, settledMarket.fees, 0, new bytes(0));
 
         return settledMarket;
     }
