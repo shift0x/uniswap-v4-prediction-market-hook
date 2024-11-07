@@ -2,6 +2,9 @@
 
 pragma solidity ^0.8.24;
 
+import {PoolId} from "v4-core/src/types/PoolId.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+
 enum Side {
     Bull,
     Bear,
@@ -16,9 +19,7 @@ struct Position {
 
 struct PredictionMarket {
     bytes32 id;
-    address pool;
-    address token0;
-    address token1;
+    PoolId pool;
     uint256 endTime;
     uint256 liquidity;
     uint256 balanceBull;
@@ -29,4 +30,10 @@ struct PredictionMarket {
     uint256 closingBullValue;
     uint256 closingBearValue;
     bool settled;
+}
+
+struct PoolInfo {
+    PoolKey pool;
+    uint256 lastActivityBlock;
+    bool registered;
 }

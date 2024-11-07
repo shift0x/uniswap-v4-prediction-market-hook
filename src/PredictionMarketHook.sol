@@ -14,13 +14,20 @@ import { PositionStorage } from './lib/PositionStorage.sol';
 import { 
     PredictionMarket,
     Position,
-    Side 
+    Side,
+    PoolInfo 
 } from './Types.sol';
 
-
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {BaseHook} from "v4-periphery/src/base/hooks/BaseHook.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {Currency, CurrencyLibrary} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 /**
  * @notice Host prediction markets using balancer pools as price oracles. Fees collected from the markets are distributed to LPs
@@ -33,18 +40,22 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
  */
 contract PredictionMarketHook is BaseHook {
     using SafeCast for uint256;
-    using FixedPoint for uint256;
     using SafeERC20 for IERC20;
     using PredictionMarketLib for PredictionMarket;
     using PredictionMarketStorage for mapping(bytes32 => PredictionMarket);
     using PositionStorage for mapping(bytes32 => mapping(address => Position));
     using PositionStorage for Position;
+    using PoolIdLibrary for PoolKey;
+    using CurrencyLibrary for Currency;
 
     /// @notice fee charged by hook to prediction market participants
     uint256 public constant FEE = 10000; // 1%
 
     /// @notice waiting period after a swap occurs in a pool and when a market can be settled
     uint256 public constant SETTLEMENT_WAITING_PERIOD_BLOCKS = 10;
+
+    /// @notice the default transaction fee for swappers not participating in a prediction market
+    uint24 public immutable DEFAULT_SWAP_FEE;
     
     /**
      * @notice Mapping between prediction market id and the corresponding markets
@@ -58,17 +69,17 @@ contract PredictionMarketHook is BaseHook {
      * @dev mapping(marketId => mapping(userAddress => Position))
      */
     mapping(bytes32 => mapping(address => Position)) public positions;
-
-    /// @notice Lookup of pools registered with the hook
-    mapping(address => bool) private _isPoolRegistered;
     
     /**
-     * @notice Lookup of the last swap block by pool
-     * @dev Market settlement will fail if the last pool swap was done within the configured SETTLEMENT_WAITING_PERIOD.
+     * @notice Stored pool information lookup
+     * @dev PoolInfo is used to store information like registration status, currency and the last swap block
+     * of the pool.
+     *
+     * Market settlement will fail if the last pool swap was done within the configured SETTLEMENT_WAITING_PERIOD_BLOCKS.
      * This is to mitigate price manipulation possibilities by allowing arbitrage to bring the pool back into balance
      * if it has been brought out of balance by a malicious actor
      */ 
-    mapping(PoolId => uint256) private _lastActivityBlockByPool;
+    mapping(PoolId => PoolInfo) private _poolRegistry;
 
     /**
      * @notice Lookup of user address and pool prediction market participation end time
@@ -93,26 +104,44 @@ contract PredictionMarketHook is BaseHook {
     /// @notice The pool is not registered with the hook
     error PoolNotFound();
 
-    /// @notice The pool token pair does not exist
-    error InvalidTokenPair();
-
     /// @notice Time provided timestamp is in the past
     error TimestampIsInPast();
 
-    constructor(IPoolManager _poolManager) 
-        BaseHook(_poolManager) {}
+    /// @notice The pool must use a dynamic fee
+    error PoolMustUseDynamicFees();
+
+    /// @notice Unuathorized call
+    error Unauthorized();
+
+    /// @dev Only pools with hooks set to this contract may call this function
+    modifier poolManagerOnly() {
+        if (msg.sender != address(poolManager)) revert Unauthorized();
+        _;
+    }
+
+    constructor(
+        IPoolManager _poolManager,
+        uint24 defaultFee) BaseHook(_poolManager
+    ) {
+        DEFAULT_SWAP_FEE = defaultFee;
+    }
 
     
+    /************************************
+     * Hook Overrides    
+     ************************************/
+
+    /// @inheritdoc BaseHook
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
-            beforeInitialize: false,
+            beforeInitialize: true,
             afterInitialize: false,
             beforeAddLiquidity: false,
-            afterAddLiquidity: true,
+            afterAddLiquidity: false,
             beforeRemoveLiquidity: false,
-            afterRemoveLiquidity: true,
+            afterRemoveLiquidity: false,
             beforeSwap: true,
-            afterSwap: true,
+            afterSwap: false,
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
@@ -122,86 +151,51 @@ contract PredictionMarketHook is BaseHook {
         });
     }
 
-    /************************************
-     * Hook Overrides    
-     ************************************/
-
     /// @inheritdoc IHooks
-    function onRegister(
-        address poolFactory,
-        address pool,
-        TokenConfig[] memory,
-        LiquidityManagement calldata liquidityManagement
-    ) public override onlyVault returns (bool) {
-        // This hook requires donation support to work. Fees collected from prediction markets are donated back to LPs
-        if (liquidityManagement.enableDonation == false) {
-            revert PoolDoesNotSupportDonation();
-        }
+    function beforeInitialize(
+        address, 
+        PoolKey calldata key, 
+        uint160
+    ) external override returns (bytes4) {
+        // Revert if the pool does not support dynamic fee (0x800000). 
+        // This is needed to properly incentivize arb in the pool
+        if (key.fee != 0x800000){
+            revert PoolMustUseDynamicFees();
+        } 
 
-        _isPoolRegistered[pool] = true;
+        PoolId poolId = key.toId();
 
-        emit PredictionMarketHookRegistered(address(this), pool);
+        _poolRegistry[poolId] = PoolInfo(key, 0, true);
 
-        return poolFactory == factory  && IBasePoolFactory(factory).isPoolFromFactory(pool);
+        emit PredictionMarketHookRegistered(address(this), poolId);
+
+        return BaseHook.beforeInitialize.selector;
     }
 
     /// @inheritdoc IHooks
-    function onComputeDynamicSwapFeePercentage(
-        PoolSwapParams calldata,
-        address pool,
-        uint256 staticSwapFeePercentage
-    ) public view override returns (bool, uint256) {
+    function beforeSwap(
+        address, 
+        PoolKey calldata key, 
+        IPoolManager.SwapParams calldata swapParams, 
+        bytes calldata
+    ) external override poolManagerOnly returns (bytes4, BeforeSwapDelta, uint24){
+        PoolId poolId = key.toId();
+        uint24 fee = DEFAULT_SWAP_FEE | LPFeeLibrary.OVERRIDE_FEE_FLAG;
+
+        // Record the last swap block for the pool. Used later to determine whether a market should
+        // be settled.
+        _poolRegistry[poolId].lastActivityBlock = block.number;
+        
         // if the swapper is participating in an unexpired prediction market, then allow them to swap
         // for 0 fee. This is to incentivize arbitrage that will bring the pool price back into balance
         // to protect the pool price from being manipulated.
-        uint256 timestamp = _predictionMarketPartipants[msg.sender][pool];
+        uint256 timestamp = _predictionMarketPartipants[msg.sender][poolId];
 
         if(timestamp > block.timestamp){
-            return (true, 0);
+            fee = 0 | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         }
 
-        return (true, staticSwapFeePercentage);
-    }
-
-    /// @inheritdoc IHooks
-    function onAfterSwap(AfterSwapParams calldata params) public override returns (bool, uint256) {
-        // Record the last swap block for the pool. Used later to determine whether a market should
-        // be settled.
-        _lastActivityBlockByPool[params.pool] = block.number;
-        
-        return (true, params.amountCalculatedRaw);
-    }
-
-    /// @inheritdoc IHooks
-    function onAfterAddLiquidity(
-        address,
-        address pool,
-        AddLiquidityKind,
-        uint256[] memory,
-        uint256[] memory amountsInRaw,
-        uint256,
-        uint256[] memory,
-        bytes memory
-    ) public override returns (bool, uint256[] memory) {
-        _lastActivityBlockByPool[pool] = block.number;
-
-        return (true, amountsInRaw);
-    }
-
-    /// @inheritdoc IHooks
-    function onAfterRemoveLiquidity(
-        address,
-        address pool,
-        RemoveLiquidityKind,
-        uint256,
-        uint256[] memory,
-        uint256[] memory amountsOutRaw,
-        uint256[] memory,
-        bytes memory
-    ) public override returns (bool, uint256[] memory) {
-        _lastActivityBlockByPool[pool] = block.number;
-
-        return (true, amountsOutRaw);
+        return (BaseHook.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee);
     }
 
     /************************************
@@ -214,18 +208,14 @@ contract PredictionMarketHook is BaseHook {
      * @dev Useful for external callers
      *
      * @param pool Pool hosting the prediction market
-     * @param tokenA First token in the pair
-     * @param tokenB Second token in the pair
      * @param closedAtTimestamp Timestamp for when the market closes
      * @return marketId hashed market id
      */
     function getMarketId(
-        address pool,
-        address tokenA,
-        address tokenB,
+        PoolId pool,
         uint256 closedAtTimestamp
     ) public pure returns (bytes32 marketId) {
-        return PredictionMarketStorage.getMarketId(pool, tokenA, tokenB, closedAtTimestamp);
+        return PredictionMarketStorage.getMarketId(pool, closedAtTimestamp);
     }
 
     /**
@@ -257,23 +247,21 @@ contract PredictionMarketHook is BaseHook {
      * One can think of this style of prediction market as an implementation of on-chain binary options 
      *
      * @param pool Pool hosting the prediction market
-     * @param tokenA First token in the pair
-     * @param tokenB Second token in the pair
      * @param closedAtTimestamp Timestamp for when the market closes
      * @param amount Deposit amount
      * @param side Side to add liquidity to, optionally choose both to add proportionally
      * @return position Resulting user liquidity position after deposit
      */
     function addLiquidity(
-        address pool,
-        address tokenA,
-        address tokenB,
+        PoolId pool,
         uint256 closedAtTimestamp,
         uint256 amount,
         Side side
     ) public returns (Position memory position) {
+        PoolInfo memory poolInfo = _poolRegistry[pool];
+
         // only create prediction markets for pools registered with the hook
-        if(!_isPoolRegistered[pool]) {
+        if(!poolInfo.registered) {
             revert PoolNotFound();
         }
 
@@ -281,20 +269,14 @@ contract PredictionMarketHook is BaseHook {
         if(closedAtTimestamp <= block.timestamp) {
             revert TimestampIsInPast();
         }
-
-        // prediction markets cannot be priced when tokens in the pair are equal or the pool does not contain the requested
-        // tokens. Revert if ether case is true
-        if(!_canCreateMarketFromPoolAndTokens(pool, tokenA, tokenB)){
-            revert InvalidTokenPair();
-        }
         
         // add liquidity to the corresponding prediction market to the user request. If one is not found, one will be created
         (uint256 bullAmount, uint256 bearAmount, PredictionMarket memory market) = 
-            markets.addLiquidity(pool, tokenA, tokenB, closedAtTimestamp, _vault, side, amount, FEE);
+            markets.addLiquidity(pool, closedAtTimestamp, poolManager, side, amount, FEE);
 
         // transfer deposit funds from the user account to the hook contract. The user position will be updated for bull 
         // and bear units corresponding to the current market prices after fees. 
-        IERC20(market.token0).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(Currency.unwrap(poolInfo.pool.currency0)).safeTransferFrom(msg.sender, address(this), amount);
 
         // Apply user position deltas and store the updated market. Add liquidity deltas are always positive uint256, so we 
         // need to convert them to int256() prior to calling applyPositionDelta(int256, int256).
@@ -321,12 +303,17 @@ contract PredictionMarketHook is BaseHook {
      *
      */
     function settle(bytes32 marketId) public returns (PredictionMarket memory market) {
-        address pool = markets[marketId].pool;
-        uint256 lastActivityBlock = _lastActivityBlockByPool[pool];
+        PoolId pool = markets[marketId].pool;
+        PoolInfo memory poolInfo = _poolRegistry[pool];
 
-        PredictionMarket memory settledMarket = markets.settle(marketId, lastActivityBlock, SETTLEMENT_WAITING_PERIOD, _vault);
+        PredictionMarket memory settledMarket = markets.settle(
+            marketId, 
+            poolInfo.lastActivityBlock, 
+            SETTLEMENT_WAITING_PERIOD_BLOCKS, 
+            poolManager,
+            Currency.unwrap(poolInfo.pool.currency0));
 
-        _donate(settledMarket.pool, settledMarket.token0, settledMarket.fees);
+        poolManager.donate(poolInfo.pool, settledMarket.fees, 0, new bytes(0));
 
         return settledMarket;
     }
@@ -352,12 +339,13 @@ contract PredictionMarketHook is BaseHook {
             return 0;
         }
 
-        uint256 userClaimAmount = position.getClaimableBalance(market);
+        address claimToken = Currency.unwrap(_poolRegistry[market.pool].pool.currency0);
+        uint256 userClaimAmount = position.getClaimableBalance(market, claimToken);
 
         positions[marketId][msg.sender].collected = true;
 
         if(userClaimAmount > 0){
-            IERC20(market.token0).safeTransfer(msg.sender, userClaimAmount);
+            IERC20(claimToken).safeTransfer(msg.sender, userClaimAmount);
         }
 
         return userClaimAmount;
@@ -394,77 +382,6 @@ contract PredictionMarketHook is BaseHook {
         return updatedPosition;
     }
 
-    /**
-     * @notice Determines whether a given pool and token combination is valid
-     * @dev pool must contain both tokens in the pair to be valid. Otherwise we will not be able to price markets and 
-     * determine outcomes
-     * @param pool Pool hosting the prediction market
-     * @param tokenA First token in the pair
-     * @param tokenB Second token in the pair
-     * @return canCreateMarket True if the market can be created from the given pool and token
-     */
-    function _canCreateMarketFromPoolAndTokens(
-        address pool,
-        address tokenA,
-        address tokenB
-    ) private view returns (bool canCreateMarket) {
-        // cannot create markets with the same token
-        if(tokenA == tokenB) {
-            return false;
-        }
-
-        // get the pool tokens from the vault and return true if both tokens in the pair are contained in the pool
-        IERC20[] memory tokens = _vault.getPoolTokens(pool);
-        bool hasTokenA;
-        bool hasTokenB;
-
-        for(uint256 i=0; i<tokens.length;++i){
-            address token = address(tokens[i]);
-
-            if(token == tokenA){
-                hasTokenA = true;
-            }
-
-            if(token == tokenB) {
-                hasTokenB = true;
-            }
-        }
-
-        return hasTokenA && hasTokenB;
-    }
-
-    /**
-     * @notice Dontate fees back to pool LPs
-     * @param pool Pool to donate fees to
-     * @param token Fee denomination token
-     * @param amount Amount to donate
-     */
-    function _donate(
-        address pool,
-        address token,
-        uint256 amount
-    ) private {
-        IERC20[] memory tokens = _vault.getPoolTokens(pool);
-        uint256[] memory feeAmounts = new uint256[](tokens.length);
-
-        for(uint256 i=0; i<tokens.length;i++){
-            feeAmounts[i] = address(tokens[i]) == token ? amount : 0;
-        }
-
-        // Donates accrued fees back to LPs
-        _vault.addLiquidity(
-            AddLiquidityParams({
-                pool: pool,
-                to: address(this), // It would mint BPTs to hook, but it's a donation so no BPT is minted
-                maxAmountsIn: feeAmounts, // Donate all accrued fees back to the pool (i.e. to the LPs)
-                minBptAmountOut: 0, // Donation does not return BPTs, any number above 0 will revert
-                kind: AddLiquidityKind.DONATION,
-                userData: bytes("") // User data is not used by donation, so we can set it to an empty string
-            })
-        );
-    }
-
-    
 
 
 }

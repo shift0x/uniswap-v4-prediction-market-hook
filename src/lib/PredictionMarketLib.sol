@@ -7,11 +7,13 @@ import {
     Side 
 } from '../Types.sol';
 
-import { IVault } from "@balancer-labs/v3-interfaces/contracts/vault/IVault.sol";
 import { Math } from "@openzeppelin/contracts/utils/math/Math.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
+import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
 
 library PredictionMarketLib { 
+    using StateLibrary for IPoolManager;
 
     /**
      * @notice Prediction market has zero token balance for one of both pair tokens
@@ -49,42 +51,17 @@ library PredictionMarketLib {
 
     /**
      * @notice Quote the asset pair in the underlying pool
-     * @dev Uses the total assets held by the pool and provide a simple quote based on assetA relative 
-     * to assetB instead of using the pool pricing model
-     *
-     * Reverts if the pool balance of either asset is 0
      * @param self The prediction market to quote
-     * @param vault The vault to get token balances from
+     * @param poolManager The pool manager to get pool state from
      */
     function quoteUnderlying(
         PredictionMarket memory self,
-        IVault vault
+        IPoolManager poolManager
     ) internal view returns(uint256) {
-        // Fetch token balances from pool for each token in the pair. 
-        (IERC20[] memory tokens,,,uint256[] memory lastBalancesLiveScaled18) = vault.getPoolTokenInfo(self.pool);
+        // Fetch the sqrtX96Price from the pool manager
+        (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(self.pool);
 
-        uint256 balanceToken0;
-        uint256 balanceToken1;
-
-        for(uint256 i=0; i < tokens.length; i++){
-            address token = address(tokens[i]);
-
-            if(token == self.token0) {
-                balanceToken0 = lastBalancesLiveScaled18[i];
-            } else if(token == self.token1) {
-                balanceToken1 = lastBalancesLiveScaled18[i];
-            }
-        }
-
-        // Revert if either token has a zero balance.
-        if(balanceToken0 * balanceToken1 == 0){
-            revert ZeroTokenBalance();
-        }
-
-        // Quote balance0 relative to balance1
-        // This approach does not take into account token weights for weighted pools, quotes are not
-        // expected to match other pricing methods.
-        return Math.mulDiv(balanceToken0, 1e18, balanceToken1);
+        return uint256(sqrtPriceX96);
     }
 
     /**

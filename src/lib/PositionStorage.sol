@@ -25,9 +25,10 @@ library PositionStorage {
      */
     function getClaimableBalance(
         Position memory self,
-        PredictionMarket memory market
+        PredictionMarket memory market,
+        address claimToken
     ) internal returns (uint256 claimAmount) {
-        uint256 claimTokenMultiplier = 10**IERC20Metadata(market.token0).decimals();
+        uint256 claimTokenMultiplier = 10**IERC20Metadata(claimToken).decimals();
 
         uint256 bullValue = Math.mulDiv(self.bullAmount, market.closingBullValue, claimTokenMultiplier);
         uint256 bearValue = Math.mulDiv(self.bearAmount, market.closingBearValue, claimTokenMultiplier);
