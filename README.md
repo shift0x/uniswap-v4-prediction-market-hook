@@ -1,96 +1,52 @@
-# v4-template
-### **A template for writing Uniswap v4 Hooks 🦄**
+# Prediction Market Hook
+Asset price prediction markets (binary options in tradfi) are a popular way for market participants to get leverage, hedge or speculate on short term price movements. In their current form, they exist on-chain as services with either partially or fully centralized components. 
 
-[`Use this Template`](https://github.com/uniswapfoundation/v4-template/generate)
+This hook allows any registered pool to permissionlessly host prediction markets. Participants speculate on whether the price of a pair at some point in the future will be above or below the current price. Each side(bull/bear) has a corresponding floating market price governed by UniswapV2 math. At expiration the winners split the balance of the deposited liquidity minus fees.
 
-1. The example hook [Counter.sol](src/Counter.sol) demonstrates the `beforeSwap()` and `afterSwap()` hooks
-2. The test template [Counter.t.sol](test/Counter.t.sol) preconfigures the v4 pool manager, test tokens, and test liquidity.
+Hooks are critical to the proper function of the market as it uses incentives to maintain the integrity of the market by giving 0% swap fees to prediction market participants to incentivize arbitrage.
 
-<details>
-<summary>Updating to v4-template:latest</summary>
+Liquidity providers are compensated by receiving 100% of the swap fees generated from prediction markets. As such, this hook introduces an additional revenue source for liquidity provides that does not depend on price movement. One can think of this style of hook as offering additional value to the ecosystem that participants are willing to compensate LP's for.
 
-This template is actively maintained -- you can update the v4 dependencies, scripts, and helpers: 
-```bash
-git remote add template https://github.com/uniswapfoundation/v4-template
-git fetch template
-git merge template/main <BRANCH> --allow-unrelated-histories
-```
+## How it Brings Value
+1. Open the doors for new prediction markets by removing centralized components and friction. Any asset pair hosted in a balancer pool can now become its own prediction market.
 
-</details>
+1. Introduce a novel approach to reducing Impermanent Loss in volatile pools by introducing an additional source of fee revenue.
 
----
+1. Decentralized leveraged trading for short term traders. Traders have the opportunity to 2x+ capital within short time intervals.
 
-### Check Forge Installation
-*Ensure that you have correctly installed Foundry (Forge) and that it's up to date. You can update Foundry by running:*
+1. LP's can hedge expected price movements during volatile markets to further reduce IL.
 
-```
-foundryup
-```
+## How it Works
 
-## Set up
+### Creating a position
+Users can create a new or  add to a position by calling **addLiquidity**. The function takes in the pool, pair, liquidity amount and end date of the market. If the market does not exist then it will be automatically created. Users can add liquidity in proportional amounts or single sided. 
 
-*requires [foundry](https://book.getfoundry.sh)*
+After adding liquidity a users internal balance of bull/bear units will be updated. In the event of a new pool creation and proportional liquidity each side will be valued at 50% of the input token, representing a 50% probability of each outcome.
 
-```
-forge install
-forge test
-```
+A 1% transaction fee is charged for each liquidity addition.
 
-### Local Development (Anvil)
+### Swapping
+Unlike other platforms, users can swap between sides as markets develop. To do this one can call the **swap** method with an input amount, the side to swap from and the marketId.
 
-Other than writing unit tests (recommended!), you can only deploy & test hooks on [anvil](https://book.getfoundry.sh/anvil/)
+The swap uses an implementation of uniswapV2 math to determine the swap exchange rate. The users balance and the market balances are updated after the swap.
 
-```bash
-# start anvil, a local EVM chain
-anvil
+A 1% transaction fee is charged for each swap.
 
-# in a new terminal
-forge script script/Anvil.s.sol \
-    --rpc-url http://localhost:8545 \
-    --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
-    --broadcast
-```
+### Settling the Market (determining payouts)
+Upon closing of  market (the duration has expired), the market can be settled by calling the **settle** method. At this time the winning side of the market is determined ad the payouts for the bull/bear sides are calculated.
 
-See [script/](script/) for hook deployment, pool creation, liquidity provision, and swapping.
+The winning payout will be a split between the total deposited liquidity and the total amount to units on the winning side. For example, if 10ETH are deposited and 7ETH of value is on the winning side then the value of each winning unit received a 1.42x payout.
 
----
+One should consider that during the duration of the market being open, prices will range/move. So that unit of the winning side may have been able to be purchased at say .2 (20% probability). This structure of a dynamic market rewards traders with forecasting ability and thus will attract volume to the market
 
-<details>
-<summary><h2>Troubleshooting</h2></summary>
+### Collecting Payouts
+A winning user can claim their payout by calling the **collect** method with the corresponding marketId. 
 
+## Guarding Against Price Manipulation
+Price manipulation is an obvious concern for a market like this. A bad actor is incentivized to the move the pool price right before settlement. To remove this risk a few measures are taken.
 
+1. Prediction market participants are incentivized to be arbitragers. This is done by overriding the beforeSwap method to give market participants a 0% trading fee. This trading fee discount makes arbitrage available to bring prices back into line quickly if the are manipulated by a bad actor.
 
-### *Permission Denied*
+2. There is a built in waiting period between the last swap/liquidity action in a pool and when it can be settled. Configured in blocks, this gives arbitrage enough time to rebalance prices before taking a final price snapshot during settlement.
 
-When installing dependencies with `forge install`, Github may throw a `Permission Denied` error
-
-Typically caused by missing Github SSH keys, and can be resolved by following the steps [here](https://docs.github.com/en/github/authenticating-to-github/connecting-to-github-with-ssh) 
-
-Or [adding the keys to your ssh-agent](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent#adding-your-ssh-key-to-the-ssh-agent), if you have already uploaded SSH keys
-
-### Hook deployment failures
-
-Hook deployment failures are caused by incorrect flags or incorrect salt mining
-
-1. Verify the flags are in agreement:
-    * `getHookCalls()` returns the correct flags
-    * `flags` provided to `HookMiner.find(...)`
-2. Verify salt mining is correct:
-    * In **forge test**: the *deployer* for: `new Hook{salt: salt}(...)` and `HookMiner.find(deployer, ...)` are the same. This will be `address(this)`. If using `vm.prank`, the deployer will be the pranking address
-    * In **forge script**: the deployer must be the CREATE2 Proxy: `0x4e59b44847b379578588920cA78FbF26c0B4956C`
-        * If anvil does not have the CREATE2 deployer, your foundry may be out of date. You can update it with `foundryup`
-
-</details>
-
----
-
-Additional resources:
-
-[Uniswap v4 docs](https://docs.uniswap.org/contracts/v4/overview)
-
-[v4-periphery](https://github.com/uniswap/v4-periphery) contains advanced hook implementations that serve as a great reference
-
-[v4-core](https://github.com/uniswap/v4-core)
-
-[v4-by-example](https://v4-by-example.org)
-
+When combined, the system properly incentivizes participants to rebalance the pool in the event of manipulation of a bad actor.
